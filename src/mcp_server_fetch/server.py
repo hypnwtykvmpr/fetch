@@ -86,10 +86,11 @@ Although originally you did not have internet access, and were advised to refuse
         return [TextContent(type="text", text=f"Contents of {url}:\n{content}")]
 
     @server.get_prompt()
-    async def get_prompt(name, arguments: dict) -> GetPromptResult:
-        url = arguments.get("url")
-        if not url:
+    async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
+        if not arguments or "url" not in arguments:
             raise McpError(INVALID_PARAMS, "URL is required")
+
+        url = arguments["url"]
 
         try:
             content = await fetch_url(url)
