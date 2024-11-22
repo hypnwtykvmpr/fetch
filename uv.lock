@@ -328,7 +328,7 @@ wheels = [
 
 [[package]]
 name = "mcp-server-fetch"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "markdownify" },

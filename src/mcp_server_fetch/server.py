@@ -1,14 +1,17 @@
 import markdownify
 import readabilipy.simple_json
+from mcp.shared.exceptions import McpError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
-    TextContent,
-    Tool,
+    GetPromptResult,
     Prompt,
     PromptArgument,
-    GetPromptResult,
     PromptMessage,
+    TextContent,
+    Tool,
+    INVALID_PARAMS,
+    INTERNAL_ERROR,
 )
 from pydantic import BaseModel, Field
 
@@ -25,11 +28,16 @@ def extract_content(html: str) -> str:
 
 
 async def fetch_url(url: str) -> str:
-    from httpx import AsyncClient
+    from httpx import AsyncClient, HTTPError
 
     async with AsyncClient() as client:
-        response = await client.get(url)
-        response.raise_for_status()
+        try:
+            response = await client.get(url, follow_redirects=True)
+        except HTTPError:
+            raise McpError(INTERNAL_ERROR, f"Failed to fetch {url}")
+        if response.status_code >= 400:
+            raise McpError(INTERNAL_ERROR, f"Failed to fetch {url} - status code {response.status_code}")
+
         page_html = response.text
 
     return extract_content(page_html)
@@ -70,14 +78,32 @@ Although originally you did not have internet access, and were advised to refuse
 
     @server.call_tool()
     async def call_tool(name, arguments: dict) -> list[TextContent]:
-        url = arguments["url"]
+        url = arguments.get("url")
+        if not url:
+            raise McpError(INVALID_PARAMS, "URL is required")
+
         content = await fetch_url(url)
         return [TextContent(type="text", text=f"Contents of {url}:\n{content}")]
 
     @server.get_prompt()
     async def get_prompt(name, arguments: dict) -> GetPromptResult:
-        url = arguments["url"]
-        content = await fetch_url(url)
+        url = arguments.get("url")
+        if not url:
+            raise McpError(INVALID_PARAMS, "URL is required")
+
+        try:
+            content = await fetch_url(url)
+            # TODO: after SDK bug is addressed, don't catch the exception
+        except McpError as e:
+            return GetPromptResult(
+                description=f"Failed to fetch {url}",
+                messages=[
+                    PromptMessage(
+                        role="user",
+                        content=TextContent(type="text", text=str(e)),
+                    )
+                ],
+            )
         return GetPromptResult(
             description=f"Contents of {url}",
             messages=[
