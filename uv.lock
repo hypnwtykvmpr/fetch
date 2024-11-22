@@ -328,11 +328,12 @@ wheels = [
 
 [[package]]
 name = "mcp-server-fetch"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "markdownify" },
     { name = "mcp" },
+    { name = "protego" },
     { name = "pydantic" },
     { name = "readabilipy" },
     { name = "requests" },
@@ -348,6 +349,7 @@ dev = [
 requires-dist = [
     { name = "markdownify", specifier = ">=0.13.1" },
     { name = "mcp", specifier = ">=0.6.0" },
+    { name = "protego", specifier = ">=0.3.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "readabilipy", specifier = ">=0.2.0" },
     { name = "requests", specifier = ">=2.32.3" },
@@ -366,6 +368,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/43/16/fc88b08840de0e0a72a2f9d8c6bae36be573e475a6326ae854bcc549fc45/nodeenv-1.9.1.tar.gz", hash = "sha256:6ec12890a2dab7946721edbfbcd91f3319c6ccc9aec47be7c7e6b7011ee6645f", size = 47437 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/1d/1b658dbd2b9fa9c4c9f32accbfc0205d532c8c6194dc0f2a4c0428e7128a/nodeenv-1.9.1-py2.py3-none-any.whl", hash = "sha256:ba11c9782d29c27c70ffbdda2d7415098754709be8a7056d79a737cd901155c9", size = 22314 },
+]
+
+[[package]]
+name = "protego"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/12/cab9fa77ff4e9e444a5eb5480db4b4f872c03aa079145804aa054be377bc/Protego-0.3.1.tar.gz", hash = "sha256:e94430d0d25cbbf239bc849d86c5e544fbde531fcccfa059953c7da344a1712c", size = 3246145 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/ef/ece78585a5a189d8cc2b4c2d2b92a0dc025f156a6501159b026472ebbedc/Protego-0.3.1-py2.py3-none-any.whl", hash = "sha256:2fbe8e9b7a7dbc5016a932b14c98d236aad4c29290bbe457b8d2779666ef7a41", size = 8474 },
 ]
 
 [[package]]
