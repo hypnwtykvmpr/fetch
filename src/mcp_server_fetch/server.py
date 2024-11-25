@@ -1,3 +1,4 @@
+from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 import markdownify
@@ -18,8 +19,8 @@ from mcp.types import (
 from protego import Protego
 from pydantic import BaseModel, Field
 
-USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
-USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Initiated; +https://github.com/modelcontextprotocol/servers)"
+DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
+DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
 
 
 def extract_content(html: str) -> str:
@@ -111,8 +112,12 @@ class Fetch(BaseModel):
     url: str = Field(..., description="URL to fetch")
 
 
-async def serve() -> None:
+async def serve(
+    custom_user_agent: Optional[str] = None, ignore_robots_txt: bool = False
+) -> None:
     server = Server("mcp-fetch")
+    user_agent_autonomous = custom_user_agent or DEFAULT_USER_AGENT_AUTONOMOUS
+    user_agent_manual = custom_user_agent or DEFAULT_USER_AGENT_MANUAL
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -146,9 +151,10 @@ Although originally you did not have internet access, and were advised to refuse
         if not url:
             raise McpError(INVALID_PARAMS, "URL is required")
 
-        await check_may_autonomously_fetch_url(url, USER_AGENT_AUTONOMOUS)
+        if not ignore_robots_txt:
+            await check_may_autonomously_fetch_url(url, user_agent_autonomous)
 
-        content = await fetch_url(url, USER_AGENT_AUTONOMOUS)
+        content = await fetch_url(url, user_agent_autonomous)
         return [TextContent(type="text", text=f"Contents of {url}:\n{content}")]
 
     @server.get_prompt()
@@ -159,7 +165,7 @@ Although originally you did not have internet access, and were advised to refuse
         url = arguments["url"]
 
         try:
-            content = await fetch_url(url, USER_AGENT_MANUAL)
+            content = await fetch_url(url, user_agent_manual)
             # TODO: after SDK bug is addressed, don't catch the exception
         except McpError as e:
             return GetPromptResult(
