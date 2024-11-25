@@ -97,6 +97,26 @@ Add to your Zed settings.json:
 ```
 </details>
 
+### Customization - robots.txt
+
+By default, the server will obey a websites robots.txt file if the request came from the model (via a tool), but not if
+the request was user initiated (via a prompt). This can be disabled by adding the argument `--ignore-robots-txt` to the
+`args` list in the configuration.
+
+### Customization - User-agent
+
+By default, depending on if the request came from the model (via a tool), or was user initiated (via a prompt), the 
+server will use either the user-agent
+```
+ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)
+```
+or
+```
+ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)
+```
+
+This can be customized by adding the argument `--user-agent=YourUserAgent` to the `args` list in the configuration.
+
 ## Debugging
 
 You can use the MCP inspector to debug the server. For uvx installations:
