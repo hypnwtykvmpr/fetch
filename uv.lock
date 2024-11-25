@@ -311,7 +311,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "0.9.1"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -321,9 +321,9 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "starlette" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/1c/932818470ffd49c33509110c835101a8dc4c9cdd06028b9f647fb3dde237/mcp-0.9.1.tar.gz", hash = "sha256:e8509a37c2ab546095788ed170e0fb4d7ce0cf5a3ee56b6449c78af27321a425", size = 78218 }
+sdist = { url = "https://files.pythonhosted.org/packages/97/de/a9ec0a1b6439f90ea59f89004bb2e7ec6890dfaeef809751d9e6577dca7e/mcp-1.0.0.tar.gz", hash = "sha256:dba51ce0b5c6a80e25576f606760c49a91ee90210fed805b530ca165d3bbc9b7", size = 82891 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b3/a0/2ee813d456b57a726d583868417d1ad900fbe12ee3c8cd866e3e804ca486/mcp-0.9.1-py3-none-any.whl", hash = "sha256:7f640fcfb0be486aa510594df309920ae1d375cdca1f8aff21db3a96d837f303", size = 31562 },
+    { url = "https://files.pythonhosted.org/packages/56/89/900c0c8445ec001d3725e475fc553b0feb2e8a51be018f3bb7de51e683db/mcp-1.0.0-py3-none-any.whl", hash = "sha256:bbe70ffa3341cd4da78b5eb504958355c68381fb29971471cea1e642a2af5b8a", size = 36361 },
 ]
 
 [[package]]
@@ -348,7 +348,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "markdownify", specifier = ">=0.13.1" },
-    { name = "mcp", specifier = ">=0.6.0" },
+    { name = "mcp", specifier = ">=1.0.0" },
     { name = "protego", specifier = ">=0.3.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "readabilipy", specifier = ">=0.2.0" },
