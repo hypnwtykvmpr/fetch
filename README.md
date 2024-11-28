@@ -16,6 +16,8 @@ Presently the server only supports fetching HTML content.
 
 ## Installation
 
+Optionally: Install node.js, this will cause the fetch serve to use a different HTML simplifier that is more robust.
+
 ### Using uv (recommended)
 
 When using [`uv`](https://docs.astral.sh/uv/) no specific installation is needed. We will

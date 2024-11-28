@@ -24,11 +24,13 @@ DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://
 
 
 def extract_content(html: str) -> str:
-    ret = readabilipy.simple_json.simple_json_from_html_string(html)
+    ret = readabilipy.simple_json.simple_json_from_html_string(
+        html, use_readability=True
+    )
     if not ret["plain_content"]:
         return "<error>Page failed to be simplified from HTML</error>"
     content = markdownify.markdownify(
-        ret["plain_content"],
+        ret["content"],
         heading_style=markdownify.ATX,
     )
     return content
