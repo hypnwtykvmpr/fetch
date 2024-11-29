@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import markdownify
@@ -17,13 +17,21 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 from protego import Protego
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, AnyUrl, conint
 
 DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
 
 
 def extract_content_from_html(html: str) -> str:
+    """Extract and convert HTML content to Markdown format.
+
+    Args:
+        html: Raw HTML content to process
+
+    Returns:
+        Simplified markdown version of the content
+    """
     ret = readabilipy.simple_json.simple_json_from_html_string(
         html, use_readability=True
     )
@@ -36,9 +44,17 @@ def extract_content_from_html(html: str) -> str:
     return content
 
 
-def get_robots_txt_url(url: str) -> str:
+def get_robots_txt_url(url: AnyUrl | str) -> str:
+    """Get the robots.txt URL for a given website URL.
+
+    Args:
+        url: Website URL to get robots.txt for
+
+    Returns:
+        URL of the robots.txt file
+    """
     # Parse the URL into components
-    parsed = urlparse(url)
+    parsed = urlparse(str(url))
 
     # Reconstruct the base URL with just scheme, netloc, and /robots.txt path
     robots_url = urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
@@ -46,7 +62,7 @@ def get_robots_txt_url(url: str) -> str:
     return robots_url
 
 
-async def check_may_autonomously_fetch_url(url: str, user_agent: str):
+async def check_may_autonomously_fetch_url(url: AnyUrl | str, user_agent: str) -> None:
     """
     Check if the URL can be fetched by the user agent according to the robots.txt file.
     Raises a McpError if not.
@@ -89,7 +105,9 @@ async def check_may_autonomously_fetch_url(url: str, user_agent: str):
         )
 
 
-async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str, str):
+async def fetch_url(
+    url: AnyUrl | str, user_agent: str, force_raw: bool = False
+) -> Tuple[str, str]:
     """
     Fetch the URL and return the content in a form ready for the LLM, as well as a prefix string with status information.
     """
@@ -98,7 +116,7 @@ async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str,
     async with AsyncClient() as client:
         try:
             response = await client.get(
-                url,
+                str(url),
                 follow_redirects=True,
                 headers={"User-Agent": user_agent},
                 timeout=30,
@@ -128,9 +146,13 @@ async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str,
 
 
 class Fetch(BaseModel):
-    url: str = Field(..., description="URL to fetch")
-    max_length: int = Field(5000, description="Maximum number of characters to return.")
-    start_index: int = Field(
+    """Parameters for fetching a URL."""
+
+    url: AnyUrl = Field(..., description="URL to fetch")
+    max_length: conint(gt=0, lt=1000000) = Field(
+        5000, description="Maximum number of characters to return."
+    )
+    start_index: conint(ge=0) = Field(
         0,
         description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
     )
@@ -143,6 +165,12 @@ class Fetch(BaseModel):
 async def serve(
     custom_user_agent: Optional[str] = None, ignore_robots_txt: bool = False
 ) -> None:
+    """Run the fetch MCP server.
+
+    Args:
+        custom_user_agent: Optional custom User-Agent string to use for requests
+        ignore_robots_txt: Whether to ignore robots.txt restrictions
+    """
     server = Server("mcp-fetch")
     user_agent_autonomous = custom_user_agent or DEFAULT_USER_AGENT_AUTONOMOUS
     user_agent_manual = custom_user_agent or DEFAULT_USER_AGENT_MANUAL
