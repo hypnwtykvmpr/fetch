@@ -98,7 +98,10 @@ async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str,
     async with AsyncClient() as client:
         try:
             response = await client.get(
-                url, follow_redirects=True, headers={"User-Agent": user_agent}, timeout=30,
+                url,
+                follow_redirects=True,
+                headers={"User-Agent": user_agent},
+                timeout=30,
             )
         except HTTPError as e:
             raise McpError(INTERNAL_ERROR, f"Failed to fetch {url}: {e!r}")
@@ -111,19 +114,30 @@ async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str,
         page_raw = response.text
 
     content_type = response.headers.get("content-type", "")
-    is_page_html = "<html" in page_raw[:100] or "text/html" in content_type or not content_type
+    is_page_html = (
+        "<html" in page_raw[:100] or "text/html" in content_type or not content_type
+    )
 
     if is_page_html and not force_raw:
         return extract_content_from_html(page_raw), ""
 
-    return page_raw, f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n"
+    return (
+        page_raw,
+        f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n",
+    )
 
 
 class Fetch(BaseModel):
     url: str = Field(..., description="URL to fetch")
     max_length: int = Field(5000, description="Maximum number of characters to return.")
-    start_index: int = Field(0, description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.")
-    raw: bool = Field(False, description="Get the actual HTML content if the requested page, without simplification.")
+    start_index: int = Field(
+        0,
+        description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
+    )
+    raw: bool = Field(
+        False,
+        description="Get the actual HTML content if the requested page, without simplification.",
+    )
 
 
 async def serve(
@@ -173,7 +187,9 @@ Although originally you did not have internet access, and were advised to refuse
         if not ignore_robots_txt:
             await check_may_autonomously_fetch_url(url, user_agent_autonomous)
 
-        content, prefix = await fetch_url(url, user_agent_autonomous, force_raw=args.raw)
+        content, prefix = await fetch_url(
+            url, user_agent_autonomous, force_raw=args.raw
+        )
         if len(content) > args.max_length:
             content = content[args.start_index : args.start_index + args.max_length]
             content += f"\n\n<error>Content truncated. Call the fetch tool with a start_index of {args.start_index + args.max_length} to get more content.</error>"
