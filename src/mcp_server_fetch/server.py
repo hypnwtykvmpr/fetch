@@ -89,7 +89,7 @@ async def check_may_autonomously_fetch_url(url: str, user_agent: str):
         )
 
 
-async def fetch_url(url: str, user_agent: str) -> (str, str):
+async def fetch_url(url: str, user_agent: str, force_raw: bool = False) -> (str, str):
     """
     Fetch the URL and return the content in a form ready for the LLM, as well as a prefix string with status information.
     """
@@ -111,7 +111,9 @@ async def fetch_url(url: str, user_agent: str) -> (str, str):
         page_raw = response.text
 
     content_type = response.headers.get("content-type", "")
-    if "<html" in page_raw[:100] or "text/html" in content_type or not content_type:
+    is_page_html = "<html" in page_raw[:100] or "text/html" in content_type or not content_type
+
+    if is_page_html and not force_raw:
         return extract_content_from_html(page_raw), ""
 
     return page_raw, f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n"
@@ -121,6 +123,7 @@ class Fetch(BaseModel):
     url: str = Field(..., description="URL to fetch")
     max_length: int = Field(5000, description="Maximum number of characters to return.")
     start_index: int = Field(0, description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.")
+    raw: bool = Field(False, description="Get the actual HTML content if the requested page, without simplification.")
 
 
 async def serve(
@@ -135,7 +138,7 @@ async def serve(
         return [
             Tool(
                 name="fetch",
-                description="""Fetches a URL from the internet and extracts its contents as markdown.
+                description="""Fetches a URL from the internet and optionally extracts its contents as markdown.
 
 Although originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.""",
                 inputSchema=Fetch.model_json_schema(),
@@ -170,7 +173,7 @@ Although originally you did not have internet access, and were advised to refuse
         if not ignore_robots_txt:
             await check_may_autonomously_fetch_url(url, user_agent_autonomous)
 
-        content, prefix = await fetch_url(url, user_agent_autonomous)
+        content, prefix = await fetch_url(url, user_agent_autonomous, force_raw=args.raw)
         if len(content) > args.max_length:
             content = content[args.start_index : args.start_index + args.max_length]
             content += f"\n\n<error>Content truncated. Call the fetch tool with a start_index of {args.start_index + args.max_length} to get more content.</error>"
