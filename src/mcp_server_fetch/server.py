@@ -23,11 +23,11 @@ DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
 
 
-def extract_content(html: str) -> str:
+def extract_content_from_html(html: str) -> str:
     ret = readabilipy.simple_json.simple_json_from_html_string(
         html, use_readability=True
     )
-    if not ret["plain_content"]:
+    if not ret["content"]:
         return "<error>Page failed to be simplified from HTML</error>"
     content = markdownify.markdownify(
         ret["content"],
@@ -105,13 +105,18 @@ async def fetch_url(url: str, user_agent: str) -> str:
                 f"Failed to fetch {url} - status code {response.status_code}",
             )
 
-        page_html = response.text
+        page_raw = response.text
 
-    return extract_content(page_html)
+    content_type = response.headers.get("content-type", "")
+    if "<html" in page_raw[:100] or "text/html" in content_type or not content_type:
+        return extract_content_from_html(page_raw)
+
+    return f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n{page_raw}"
 
 
 class Fetch(BaseModel):
     url: str = Field(..., description="URL to fetch")
+    start_index: int = Field(0, description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.")
 
 
 async def serve(
