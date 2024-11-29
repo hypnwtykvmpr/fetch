@@ -95,10 +95,10 @@ async def fetch_url(url: str, user_agent: str) -> str:
     async with AsyncClient() as client:
         try:
             response = await client.get(
-                url, follow_redirects=True, headers={"User-Agent": user_agent}
+                url, follow_redirects=True, headers={"User-Agent": user_agent}, timeout=30,
             )
-        except HTTPError:
-            raise McpError(INTERNAL_ERROR, f"Failed to fetch {url}")
+        except HTTPError as e:
+            raise McpError(INTERNAL_ERROR, f"Failed to fetch {url}: {e!r}")
         if response.status_code >= 400:
             raise McpError(
                 INTERNAL_ERROR,
