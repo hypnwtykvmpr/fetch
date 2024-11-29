@@ -17,7 +17,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 from protego import Protego
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
@@ -89,7 +89,10 @@ async def check_may_autonomously_fetch_url(url: str, user_agent: str):
         )
 
 
-async def fetch_url(url: str, user_agent: str) -> str:
+async def fetch_url(url: str, user_agent: str) -> (str, str):
+    """
+    Fetch the URL and return the content in a form ready for the LLM, as well as a prefix string with status information.
+    """
     from httpx import AsyncClient, HTTPError
 
     async with AsyncClient() as client:
@@ -109,13 +112,14 @@ async def fetch_url(url: str, user_agent: str) -> str:
 
     content_type = response.headers.get("content-type", "")
     if "<html" in page_raw[:100] or "text/html" in content_type or not content_type:
-        return extract_content_from_html(page_raw)
+        return extract_content_from_html(page_raw), ""
 
-    return f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n{page_raw}"
+    return page_raw, f"Content type {content_type} cannot be simplified to markdown, but here is the raw content:\n"
 
 
 class Fetch(BaseModel):
     url: str = Field(..., description="URL to fetch")
+    max_length: int = Field(5000, description="Maximum number of characters to return.")
     start_index: int = Field(0, description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.")
 
 
@@ -154,15 +158,23 @@ Although originally you did not have internet access, and were advised to refuse
 
     @server.call_tool()
     async def call_tool(name, arguments: dict) -> list[TextContent]:
-        url = arguments.get("url")
+        try:
+            args = Fetch(**arguments)
+        except ValueError as e:
+            raise McpError(INVALID_PARAMS, str(e))
+
+        url = args.url
         if not url:
             raise McpError(INVALID_PARAMS, "URL is required")
 
         if not ignore_robots_txt:
             await check_may_autonomously_fetch_url(url, user_agent_autonomous)
 
-        content = await fetch_url(url, user_agent_autonomous)
-        return [TextContent(type="text", text=f"Contents of {url}:\n{content}")]
+        content, prefix = await fetch_url(url, user_agent_autonomous)
+        if len(content) > args.max_length:
+            content = content[args.start_index : args.start_index + args.max_length]
+            content += f"\n\n<error>Content truncated. Call the fetch tool with a start_index of {args.start_index + args.max_length} to get more content.</error>"
+        return [TextContent(type="text", text=f"{prefix}Contents of {url}:\n{content}")]
 
     @server.get_prompt()
     async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
@@ -172,7 +184,7 @@ Although originally you did not have internet access, and were advised to refuse
         url = arguments["url"]
 
         try:
-            content = await fetch_url(url, user_agent_manual)
+            content, prefix = await fetch_url(url, user_agent_manual)
             # TODO: after SDK bug is addressed, don't catch the exception
         except McpError as e:
             return GetPromptResult(
@@ -188,7 +200,7 @@ Although originally you did not have internet access, and were advised to refuse
             description=f"Contents of {url}",
             messages=[
                 PromptMessage(
-                    role="user", content=TextContent(type="text", text=content)
+                    role="user", content=TextContent(type="text", text=prefix + content)
                 )
             ],
         )
