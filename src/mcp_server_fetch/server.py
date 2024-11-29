@@ -1,5 +1,4 @@
-from typing import Optional, Tuple
-from typing_extensions import Annotated
+from typing import Annotated, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import markdownify
@@ -177,7 +176,7 @@ class Fetch(BaseModel):
 
 
 async def serve(
-    custom_user_agent: Optional[str] = None, ignore_robots_txt: bool = False
+    custom_user_agent: str | None = None, ignore_robots_txt: bool = False
 ) -> None:
     """Run the fetch MCP server.
 
