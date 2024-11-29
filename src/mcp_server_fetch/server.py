@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Annotated, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import markdownify
@@ -17,7 +17,7 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 from protego import Protego
-from pydantic import BaseModel, Field, AnyUrl, conint
+from pydantic import BaseModel, Field, AnyUrl
 
 DEFAULT_USER_AGENT_AUTONOMOUS = "ModelContextProtocol/1.0 (Autonomous; +https://github.com/modelcontextprotocol/servers)"
 DEFAULT_USER_AGENT_MANUAL = "ModelContextProtocol/1.0 (User-Specified; +https://github.com/modelcontextprotocol/servers)"
@@ -148,22 +148,35 @@ async def fetch_url(
 class Fetch(BaseModel):
     """Parameters for fetching a URL."""
 
-    url: AnyUrl = Field(..., description="URL to fetch")
-    max_length: conint(gt=0, lt=1000000) = Field(
-        5000, description="Maximum number of characters to return."
-    )
-    start_index: conint(ge=0) = Field(
-        0,
-        description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
-    )
-    raw: bool = Field(
-        False,
-        description="Get the actual HTML content if the requested page, without simplification.",
-    )
+    url: Annotated[AnyUrl, Field(description="URL to fetch")]
+    max_length: Annotated[
+        int,
+        Field(
+            default=5000,
+            description="Maximum number of characters to return.",
+            gt=0,
+            lt=1000000,
+        ),
+    ]
+    start_index: Annotated[
+        int,
+        Field(
+            default=0,
+            description="On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
+            ge=0,
+        ),
+    ]
+    raw: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Get the actual HTML content if the requested page, without simplification.",
+        ),
+    ]
 
 
 async def serve(
-    custom_user_agent: Optional[str] = None, ignore_robots_txt: bool = False
+    custom_user_agent: str | None = None, ignore_robots_txt: bool = False
 ) -> None:
     """Run the fetch MCP server.
 
