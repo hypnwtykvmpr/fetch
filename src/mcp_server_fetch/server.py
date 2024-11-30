@@ -93,7 +93,7 @@ async def check_may_autonomously_fetch_url(url: AnyUrl | str, user_agent: str) -
         line for line in robot_txt.splitlines() if not line.strip().startswith("#")
     )
     robot_parser = Protego.parse(processed_robot_txt)
-    if not robot_parser.can_fetch(url, user_agent):
+    if not robot_parser.can_fetch(str(url), user_agent):
         raise McpError(
             INTERNAL_ERROR,
             f"The sites robots.txt ({robot_txt_url}), specifies that autonomous fetching of this page is not allowed, "
