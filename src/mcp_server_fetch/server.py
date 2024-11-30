@@ -74,7 +74,9 @@ async def check_may_autonomously_fetch_url(url: AnyUrl | str, user_agent: str) -
     async with AsyncClient() as client:
         try:
             response = await client.get(
-                robot_txt_url, headers={"User-Agent": user_agent}
+                robot_txt_url,
+                follow_redirects=True,
+                headers={"User-Agent": user_agent},
             )
         except HTTPError:
             raise McpError(
