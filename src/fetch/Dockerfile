@@ -1,39 +1,29 @@
-# Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS uv
+# syntax=docker/dockerfile:1
+# Digests are multi-arch index digests: resolve with
+#   docker buildx imagetools inspect <image>:<tag>   (prints "Digest: sha256:...")
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
-# Install the project into `/app`
-WORKDIR /app
-
-# Enable bytecode compilation
-ENV UV_COMPILE_BYTECODE=1
-
-# Copy from the cache instead of linking since it's a mounted volume
-ENV UV_LINK_MODE=copy
-
-# Install the project's dependencies using the lockfile and settings
-COPY uv.lock pyproject.toml ./
+FROM python:3.15.2-slim-trixie@sha256:8c13a3f37a6a5b71498228e902c4b9f51c1f7900d49fabf71f9a650c6120e0d0 AS build
+COPY --from=uv /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=/usr/local/bin/python3.15 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+WORKDIR /src
+COPY pyproject.toml uv.lock .python-version ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev --no-editable
-
-# Then, add the rest of the project source code and install it
-# Installing separately from its dependencies allows optimal layer caching
-ADD . /app
+COPY README.md LICENSE ./
+COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
-FROM python:3.12-slim-bookworm
-
-WORKDIR /app
- 
-COPY --from=uv /root/.local /root/.local
-
-RUN if ! id -u app >/dev/null 2>&1; then \
-      useradd -rUM -s /usr/sbin/nologin app; \
-    fi
-COPY --from=uv --chown=app:app /app/.venv /app/.venv
-
-# Place executables in the environment at the front of the path
+FROM python:3.15.2-slim-trixie@sha256:8c13a3f37a6a5b71498228e902c4b9f51c1f7900d49fabf71f9a650c6120e0d0
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin app
+COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
-
-# when running the container, add --db-path and a bind mount to the host's db file
-ENTRYPOINT ["mcp-server-fetch"]
+USER 10001:10001
+# No Node.js in this image: always the pure-Python extractor.
+ENTRYPOINT ["mcp-server-fetch", "--no-readability-js"]

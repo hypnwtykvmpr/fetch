@@ -1,0 +1,146 @@
+# Check Fetch's locked build and runtime across the supported platform matrix.
+name: Fetch variation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+env:
+  UV_VERSION: "0.13.6"
+  NODE_VERSION: "24"
+
+jobs:
+  lint:
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: { version: "${{ env.UV_VERSION }}", python-version: "3.15", enable-cache: false }
+      - run: uv sync --locked
+      - name: Shared lint/docs gate
+        run: uv run --locked python ci/check.py lint
+
+  test:
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/fetch
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.15"]
+        node: [true, false]
+        include:
+          - { os: ubuntu-latest, python: "3.12", node: true }
+          - { os: ubuntu-latest, python: "3.13", node: true }
+          - { os: ubuntu-latest, python: "3.14", node: true }
+          - { os: ubuntu-latest, python: "3.11.4", node: true }   # soupsieve <3.11.5 branch of the lock
+          - { os: ubuntu-latest, python: "3.12", node: false }
+          - { os: ubuntu-latest, python: "3.13", node: false }
+          - { os: ubuntu-latest, python: "3.14", node: false }
+          - { os: ubuntu-latest, python: "3.11.4", node: false }
+    name: test ${{ matrix.os }} py${{ matrix.python }} node=${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: { version: "${{ env.UV_VERSION }}", python-version: "${{ matrix.python }}", enable-cache: false }
+      - run: uv sync --locked
+      - name: Platform evidence
+        run: |
+          echo "sha=${{ github.sha }}"; uname -a; uv --version
+          uv run --locked python -c "import platform, sys; print(platform.platform(), platform.machine(), sys.version)"
+          if [ "${{ runner.os }}" = macOS ]; then test "$(uname -m)" = arm64; fi
+      - if: matrix.node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: "${{ env.NODE_VERSION }}", package-manager-cache: false }
+      - if: matrix.node
+        run: node --version && uv run --locked python scripts/provision_node_deps.py && git diff --exit-code scripts/
+      - if: ${{ !matrix.node }}
+        run: uv run --locked python ci/strip_node_path.py
+      - if: ${{ !matrix.node }}
+        name: Node is absent
+        run: if command -v node || command -v npm; then echo "node still on PATH"; exit 1; fi
+      - name: Shared test stage
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: socks5://127.0.0.1:9
+          UV_OFFLINE: "1"
+        run: >-
+          uv run --locked python ci/check.py test
+          ${{ matrix.node && '--node' || '--no-node' }}
+      - name: Shared coverage stage
+        if: matrix.node
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: socks5://127.0.0.1:9
+          UV_OFFLINE: "1"
+        run: uv run --locked python ci/check.py coverage
+
+  package:
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/fetch
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: { version: "${{ env.UV_VERSION }}", python-version: "3.15", enable-cache: false }
+      - run: uv sync --locked
+      - name: Shared package stage
+        run: uv run --locked python ci/check.py package
+
+  docker:
+    defaults:
+      run:
+        shell: bash
+        working-directory: src/fetch
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: { version: "${{ env.UV_VERSION }}", python-version: "3.15", enable-cache: false }
+      - run: uv sync --locked
+      - name: Shared Docker stage
+        run: uv run --locked python ci/check.py docker
+
+  required:
+    if: always()
+    needs: [lint, test, package, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          for r in "${{ needs.lint.result }}" "${{ needs.test.result }}" "${{ needs.package.result }}" "${{ needs.docker.result }}"; do
+            [ "$r" = success ] || { echo "required job result: $r"; exit 1; }
+          done

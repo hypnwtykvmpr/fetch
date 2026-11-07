@@ -33,9 +33,9 @@ from mcp.types import (
     TextContent,
 )
 
-from mcp_server_fetch.server import serve
+from mcp_server_fetch.server import _page_meta, serve
 
-from .harness import FakeWeb
+from .harness import FakeWeb, unwrap
 
 PAGE = "https://example.com/page"
 MODERN = "2026-07-28"
@@ -127,7 +127,10 @@ async def test_tool_call_succeeds_in_each_era(
         result = await client.call_tool("fetch", {"url": PAGE})
     assert result.is_error is False
     assert result.result_type == "complete"
-    assert text_of(result).endswith(f"Contents of {PAGE}:\nhello from both eras")
+    assert text_of(result).endswith(
+        f"Contents of {PAGE}:\nhello from both eras"
+        + _page_meta(len("hello from both eras"), 0, len("hello from both eras"))
+    )
 
 
 @pytest.mark.parametrize(("mode", "negotiated"), ERAS)
@@ -140,7 +143,7 @@ async def test_prompt_succeeds_in_each_era(
     assert result.description == "Fetch a URL and extract its contents as markdown"
     content = result.messages[0].content
     assert isinstance(content, TextContent)
-    assert content.text.endswith("prompted")
+    assert unwrap(content.text).endswith("prompted")
 
 
 @pytest.mark.parametrize(("mode", "negotiated"), ERAS)

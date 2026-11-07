@@ -24,6 +24,8 @@ import pytest
 from mcp import ClientSession
 from mcp.types import CallToolResult
 
+from mcp_server_fetch.server import _response_text, decode_page
+
 from .harness import FakeWeb, connect
 
 PAGE = "https://example.com/page"
@@ -152,7 +154,6 @@ async def test_a_text_plain_type_with_an_html_parameter_is_not_scanned(
         '<meta charset="">',
         '<meta http-equiv="Content-Type" content="text/html">',
         # A declaration Python refuses outright.
-        '<meta charset="utf\x008">',
         # The first declaration wins.
         '<meta charset="utf-8"><meta charset="windows-1251">',
     ],
@@ -182,7 +183,7 @@ async def test_a_declaration_past_the_first_1024_bytes_is_ignored(
     body = (
         f"<html><head>{padding}<meta charset=windows-1251></head>"
         f"<body><p>{JAPANESE}</p></body></html>"
-    ).encode("utf-8")
+    ).encode()
     assert JAPANESE in await fetch(web, page(body), raw=True)
 
 
@@ -230,3 +231,29 @@ async def test_a_utf16_or_utf32_declaration_is_read_as_utf8(
 ) -> None:
     body = document(f'<meta charset="{declared}">', JAPANESE).encode("utf-8")
     assert JAPANESE in await fetch(web, page(body), raw=True)
+
+
+@pytest.mark.parametrize(
+    ("label", "codec"),
+    [
+        ("utf-16", "utf-16-le"),
+        ("utf-16le", "utf-16-le"),
+        ("utf-16be", "utf-16-be"),
+        ("utf-32", "utf-32-le"),
+        ("utf-32le", "utf-32-le"),
+    ],
+)
+def test_header_only_bomless_utf16_and_utf32_are_text(label: str, codec: str) -> None:
+    response = httpx.Response(
+        200,
+        content=JAPANESE.encode(codec),
+        headers={"content-type": f"text/plain; charset={label}"},
+    )
+    assert _response_text(response) == JAPANESE
+
+
+def test_a_nul_inside_a_declaration_is_not_a_charset() -> None:
+    # Moved from the raw-fetch cases above: raw output of a body with a NUL in its
+    # first 4 KiB is now the binary notice, so decode the body directly.
+    body = document('<meta charset="utf\x008">', JAPANESE).encode("utf-8")
+    assert JAPANESE in decode_page(page(body))

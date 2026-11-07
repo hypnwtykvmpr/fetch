@@ -41,7 +41,7 @@ jobs:
         working-directory: src
         run: |
           PACKAGES=$(find . -name pyproject.toml -exec dirname {} \; | sed 's/^\.\///' | jq -R -s -c 'split("\n")[:-1]')
-          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
 
   script-tests:
     timeout-minutes: 5
@@ -82,6 +82,13 @@ jobs:
 
       # The same per-server chain `npm run validate:py` runs locally: locked
       # sync, ruff check, ruff format --check, pyright, pytest, uv build.
+      - name: Provision Fetch extraction dependencies
+        if: matrix.package == 'fetch'
+        working-directory: src/fetch
+        run: |
+          uv sync --locked --all-extras --dev
+          uv run --locked python scripts/provision_node_deps.py
+
       - name: Validate
         run: node scripts/validate-py.mjs ${{ matrix.package }}
 
@@ -113,6 +120,18 @@ jobs:
         with:
           node-version: 24
 
+      - uses: actions/setup-node@v7
+        if: matrix.package == 'fetch'
+        with:
+          node-version: 24
+
+      - name: Provision Fetch extraction dependencies
+        if: matrix.package == 'fetch'
+        working-directory: src/fetch
+        run: |
+          uv sync --locked --all-extras --dev
+          uv run --locked python scripts/provision_node_deps.py
+
       - name: Coverage
         run: npm run coverage:py -- ${{ matrix.package }}
 
@@ -142,15 +161,17 @@ jobs:
         working-directory: src/${{ matrix.package }}
         run: uv sync --locked --all-extras --dev
 
-      # fetch's tests pin the Readability.js path, which needs Node and npm.
-      # readabilipy >= 0.3.0 ships only its JavaScript's package.json, and the
-      # server installs the dependencies on first use, resolving npm through
-      # PATH so Windows' npm.cmd is found (#5313). Nothing is pre-installed
-      # here, so this leg proves that install works on Windows.
+      # Fetch provisions its locked Node dependencies before testing. Request
+      # handling never installs packages; capability tests require this setup.
       - uses: actions/setup-node@v7
         if: matrix.package == 'fetch'
         with:
           node-version: 24
+
+      - name: Provision Fetch extraction dependencies
+        if: matrix.package == 'fetch'
+        working-directory: src/fetch
+        run: uv run --locked python scripts/provision_node_deps.py
 
       - name: Run pytest
         working-directory: src/${{ matrix.package }}
