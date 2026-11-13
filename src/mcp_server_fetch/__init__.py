@@ -1,13 +1,16 @@
-from .allowlist import parse_allowed_host
-from .server import serve
-from .timeout import (
-    DEFAULT_TIMEOUT_MS,
-    MAX_TIMEOUT_MS,
-    MIN_TIMEOUT_MS,
-    TIMEOUT_ENV,
-    parse_timeout_ms,
-    timeout_ms_from_env,
-)
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .server import serve as serve
+
+
+def __getattr__(name: str) -> Any:
+    # Lazy, so `python -I -m mcp_server_fetch._worker` (one per fetch) does not load the MCP SDK.
+    if name == "serve":
+        from .server import serve
+
+        return serve
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main():
@@ -15,6 +18,17 @@ def main():
     import argparse
     import asyncio
     import os
+
+    from . import server
+    from .allowlist import parse_allowed_host
+    from .timeout import (
+        DEFAULT_TIMEOUT_MS,
+        MAX_TIMEOUT_MS,
+        MIN_TIMEOUT_MS,
+        TIMEOUT_ENV,
+        parse_timeout_ms,
+        timeout_ms_from_env,
+    )
 
     parser = argparse.ArgumentParser(
         description="give a model the ability to make web requests"
@@ -54,23 +68,30 @@ def main():
         "or npm (by default Readability.js is used when Node.js is on PATH)",
     )
 
+    parser.add_argument(
+        "--lock-sanitization",
+        action="store_true",
+        help="Refuse fetch calls with sanitize=false, so fetched pages are always sanitized",
+    )
+
     args = parser.parse_args()
-    # The server reads its timeout from the environment (see timeout.py), and
-    # the flag outranks a value already there; a bad value stops it here.
     if args.timeout_ms is not None:
         os.environ[TIMEOUT_ENV] = str(args.timeout_ms)
     try:
         timeout_ms_from_env()
     except ValueError as e:
         parser.error(str(e))
+    # Looked up at call time, so a test may patch mcp_server_fetch.serve or mcp_server_fetch.server.serve.
+    serve = globals().get("serve", server.serve)
     asyncio.run(
         serve(
-            args.user_agent,
-            args.ignore_robots_txt,
-            args.proxy_url,
-            args.allow_private_ips,
-            args.allowed_hosts,
-            not args.no_readability_js,
+            custom_user_agent=args.user_agent,
+            ignore_robots_txt=args.ignore_robots_txt,
+            proxy_url=args.proxy_url,
+            allow_private_ips=args.allow_private_ips,
+            **({"allowed_hosts": args.allowed_hosts} if args.allowed_hosts else {}),
+            use_readability_js=not args.no_readability_js,
+            lock_sanitization=args.lock_sanitization,
         )
     )
 

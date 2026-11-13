@@ -16,7 +16,7 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS, JSONRPCError, TextContent
 
-from .harness import FakeWeb, connect, raw_request
+from .harness import FakeWeb, connect, page_payload, raw_request
 from .test_eras import ERAS
 from .test_eras import connect as connect_era
 
@@ -87,5 +87,5 @@ async def test_valid_prompt_url_is_fetched_as_the_tool_would_fetch_it(
         result = await session.get_prompt("fetch", {"url": "https://example.com"})
     content = result.messages[0].content
     assert isinstance(content, TextContent)
-    assert content.text.endswith("hello")
+    assert page_payload(content.text).endswith("hello")
     assert web.urls() == ["https://example.com/"]

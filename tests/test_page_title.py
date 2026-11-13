@@ -20,7 +20,7 @@ from mcp.types import CallToolResult
 
 from mcp_server_fetch.title import page_title, with_page_title
 
-from .harness import FakeWeb, connect
+from .harness import FakeWeb, connect, page_payload
 
 PAGE = "https://example.com/page"
 ROBOTS = "https://example.com/robots.txt"
@@ -41,7 +41,7 @@ def text_of(result: CallToolResult) -> str:
     assert not result.is_error, result
     data = result.model_dump(by_alias=True, mode="json", exclude_none=True)
     assert len(data["content"]) == 1
-    return data["content"][0]["text"]
+    return page_payload(data["content"][0]["text"])
 
 
 async def fetch(web: FakeWeb, html: str, **arguments: Any) -> str:

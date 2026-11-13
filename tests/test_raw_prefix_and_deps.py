@@ -16,6 +16,7 @@ import re
 from importlib.metadata import requires
 
 import httpx
+import pytest
 
 from .harness import FakeWeb, connect
 
@@ -65,3 +66,40 @@ def test_beautifulsoup4_is_a_declared_dependency() -> None:
         for requirement in requires("mcp-server-fetch") or []
     }
     assert "beautifulsoup4" in names
+
+
+@pytest.mark.parametrize(
+    ("raw_headers", "expected"),
+    [
+        ([(b"content-type", b"text/csv; charset=utf-8")], "text/csv"),
+        ([(b"content-type", b"Text/Plain")], "text/plain"),
+        ([(b"content-type", b"text/plain\x1b[31m")], "(invalid)"),
+        ([(b"content-type", b"x" * 60000 + b"/y")], "(invalid)"),
+        ([(b"content-type", b"text/pl\xe9in")], "(invalid)"),
+        (
+            [(b"content-type", b"text/plain"), (b"content-type", b"text/html")],
+            "(invalid)",
+        ),
+    ],
+    ids=["params", "case", "escape", "huge", "non-ascii", "duplicate"],
+)
+async def test_content_type_prefix_echoes_only_a_valid_media_type(
+    web: FakeWeb, raw_headers: list[tuple[bytes, bytes]], expected: str
+) -> None:
+    text = await fetch_text(
+        web, httpx.Response(200, headers=raw_headers, content=b"data")
+    )
+    assert text.startswith(
+        f"Content type {expected} cannot be simplified to markdown, "
+        "but here is the raw content:\n"
+    )
+    assert "\x1b" not in text
+    assert len(text) < 500
+
+
+def test_requests_is_not_a_declared_dependency() -> None:
+    names = {
+        re.split(r"[\s\[<>=!~;]", requirement, maxsplit=1)[0].lower()
+        for requirement in requires("mcp-server-fetch") or []
+    }
+    assert "requests" not in names

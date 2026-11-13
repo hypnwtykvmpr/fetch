@@ -1,0 +1,12 @@
+{
+  "name": "mcp-server-fetch-readability-deps",
+  "private": true,
+  "description": "Locked Node dependencies for readabilipy's ExtractArticle.js (provisioned by scripts/provision_node_deps.py).",
+  "license": "MIT",
+  "engines": { "node": "^22.22.2 || ^24.15.0 || >=26.0.0" },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "jsdom": "30.1.3",
+    "minimist": "1.2.8"
+  }
+}

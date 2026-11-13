@@ -18,7 +18,7 @@ import pytest
 
 from mcp_server_fetch.server import MARKDOWN_ACCEPT, _is_markdown
 
-from .harness import FakeWeb, connect
+from .harness import FakeWeb, connect, page_payload
 
 PAGE = "https://example.com/doc"
 ROBOTS = "https://example.com/robots.txt"
@@ -47,7 +47,7 @@ async def call_fetch(web: FakeWeb, arguments: dict[str, object]) -> str:
         result = await session.call_tool("fetch", {"url": PAGE, **arguments})
     data = result.model_dump(by_alias=True, mode="json", exclude_none=True)
     assert data["isError"] is False
-    return data["content"][0]["text"]
+    return page_payload(data["content"][0]["text"])
 
 
 def page_requests(web: FakeWeb) -> list[httpx.Request]:
@@ -116,7 +116,7 @@ async def test_the_prompt_returns_markdown_as_is(web: FakeWeb) -> None:
     async with connect() as (session, _):
         result = await session.get_prompt("fetch", {"url": PAGE})
     message = result.model_dump(by_alias=True, mode="json")["messages"][0]
-    assert message["content"]["text"].endswith(MARKDOWN)
+    assert page_payload(message["content"]["text"]).endswith(MARKDOWN)
     assert "cannot be simplified" not in message["content"]["text"]
     [request] = page_requests(web)
     assert request.headers["accept"] == MARKDOWN_ACCEPT

@@ -1,26 +1,13 @@
-"""Tests for the server's own Readability.js runner (``readability_js``).
-
-It replaces readabilipy's Node.js wrapper, which had no timeout and blocked
-the event loop (#5306), wrote ``npm install`` output to stdout, the stdio
-JSON-RPC channel (#5310), and could not find ``npm.cmd`` on Windows (#5313).
-
-Most tests put fake ``node`` and ``npm`` shell scripts first on ``PATH`` (the
-reproduction #5306 describes), point the runner at a scratch copy of
-readabilipy's ``javascript`` directory, and clear its once-per-process probe,
-so no real Node.js runs and nothing reaches the network. Shell scripts need a
-POSIX shell, so those tests skip on Windows; there the ``node_readability``
-tests in the other files drive the real ``npm.cmd`` (the Windows CI leg no
-longer installs readabilipy's JavaScript for them).
-"""
+"""Portable subprocess regressions for the retained runner and active worker."""
 
 from __future__ import annotations
 
+import ctypes
 import os
-import shutil
-import stat
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,66 +15,57 @@ import anyio
 import httpx
 import pytest
 
+import mcp_server_fetch._worker as worker_module
 import mcp_server_fetch.server as server_module
 from mcp_server_fetch import readability_js
 
 from .harness import FakeWeb, connect
 
 PAGE = "https://example.com/article"
-
 ARTICLE = """<html><head><title>Article</title></head><body><article>
-<h1>Heading</h1>
-<p>This is a <a href="https://example.com/x">link</a> in a paragraph with
-enough words to count as the main content of the page.</p>
-</article></body></html>"""
-
-posix_only = pytest.mark.skipif(
-    sys.platform == "win32", reason="the fake node and npm are POSIX shell scripts"
+<h1>Heading</h1><p>This is a <a href="https://example.com/x">link</a> in a paragraph with
+ enough words to count as the main content of the page.</p></article></body></html>"""
+NODE_VERSION = (
+    "if sys.argv[1:] == ['-v']:\n    print('v24.0.0')\n    raise SystemExit\n"
 )
-
-# A `node` that reports a version and then does what each test's body says
-# with ExtractArticle.js's arguments: "$1" is the script, "$3" the input
-# page and "$5" the output JSON.
-NODE_VERSION = 'if [ "$1" = "-v" ]; then echo v24.0.0; exit 0; fi\n'
-
-
-def html(body: str) -> httpx.Response:
-    return httpx.Response(
-        200, content=body.encode(), headers={"content-type": "text/html"}
-    )
 
 
 @pytest.fixture
 def bindir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An empty directory that is the only place the runner looks for node and npm.
-
-    The fake scripts' own utilities (sleep, cat, mkdir) still come from the
-    system directories on PATH, but the runner's lookup sees this directory
-    alone, so a real Node.js or npm installed anywhere (/usr/bin included, as
-    a distribution installs it) is never found or run.
-    """
+    """Launch scratch Node/npm stand-ins with native Python, never a shell."""
     path = tmp_path / "bin"
     path.mkdir()
-    monkeypatch.setenv("PATH", os.pathsep.join([str(path), "/usr/bin", "/bin"]))
-    which = shutil.which  # the real one, before the module's is replaced
+    real_popen = subprocess.Popen
 
-    def only_bindir(name: str) -> str | None:
-        return which(name, path=str(path))
+    def which(name: str) -> str | None:
+        script = path / name
+        return str(script) if script.is_file() else None
 
-    monkeypatch.setattr(readability_js.shutil, "which", only_bindir)
+    def popen(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(argv, list) and Path(argv[0]).parent == path:
+            # These stdlib-only stand-ins emulate non-Python executables.
+            # Skip site startup so subprocess coverage cannot instrument the
+            # shim and consume the external tool's timeout. Product Python
+            # workers take the unchanged branch below and retain coverage.
+            argv = [sys.executable, "-S", *argv]
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(readability_js.shutil, "which", which)
+    monkeypatch.setattr(readability_js.subprocess, "Popen", popen)
     return path
 
 
 def tool(bindir: Path, name: str, body: str) -> Path:
     script = bindir / name
-    script.write_text("#!/bin/sh\n" + body)
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    script.write_text(
+        "import json, os, subprocess, sys, time\nfrom pathlib import Path\n" + body,
+        encoding="utf-8",
+    )
     return script
 
 
 @pytest.fixture
 def jsdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A scratch readabilipy `javascript` directory, with a fresh probe."""
     path = tmp_path / "javascript"
     path.mkdir()
     monkeypatch.setattr(readability_js, "javascript_dir", lambda: path)
@@ -97,7 +75,6 @@ def jsdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def install(jsdir: Path) -> None:
-    """Lay out node_modules as a completed `npm install` would."""
     for name in readability_js.JS_DEPENDENCIES:
         package = jsdir / "node_modules" / name
         package.mkdir(parents=True)
@@ -105,6 +82,18 @@ def install(jsdir: Path) -> None:
 
 
 def alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.OpenProcess(0x100000, False, pid)
+        if not handle:
+            return False
+        try:
+            return kernel.WaitForSingleObject(handle, 0) == 258
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -113,33 +102,32 @@ def alive(pid: int) -> bool:
 
 
 def wait_dead(pid: int) -> bool:
-    # A killed process is reaped by its parent; give the kernel a moment.
     deadline = time.monotonic() + 5
     while alive(pid):
-        if time.monotonic() > deadline:  # pragma: no cover  # only on failure
+        if time.monotonic() > deadline:
             return False
         time.sleep(0.05)
     return True
 
 
-# --- #5306: a bounded run, killed on timeout, off the event loop ------------
-
-
-@posix_only
 async def test_hanging_node_is_killed_and_the_call_falls_back(
-    web: FakeWeb, bindir: Path, jsdir: Path, monkeypatch: pytest.MonkeyPatch
+    web: FakeWeb, bindir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The reproduction from #5306: a node that never exits. It also starts a
-    # child of its own, which the timeout must kill as well.
-    install(jsdir)
     pids = bindir / "pids"
-    tool(
+    helper = tool(
         bindir,
-        "node",
-        NODE_VERSION + f'sleep 3600 &\necho "$$ $!" > {pids}\nwait\n',
+        "hung-node",
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        + f"Path({str(pids)!r}).write_text(f'{{os.getpid()}} {{child.pid}}')\n"
+        + "time.sleep(60)\n",
     )
-    monkeypatch.setattr(readability_js, "EXTRACT_TIMEOUT_SECONDS", 1.0)
-    web.add(PAGE, html(ARTICLE))
+    monkeypatch.setattr(
+        worker_module, "find_node", lambda: (sys.executable, str(helper))
+    )
+    monkeypatch.setattr(server_module, "_NODE_TIMEOUT", 1.0)
+    web.add(
+        PAGE, httpx.Response(200, text=ARTICLE, headers={"content-type": "text/html"})
+    )
     started = time.monotonic()
     async with connect(ignore_robots_txt=True) as (session, _):
         result = await session.call_tool("fetch", {"url": PAGE})
@@ -147,22 +135,26 @@ async def test_hanging_node_is_killed_and_the_call_falls_back(
     assert result.is_error is False
     [content] = result.content
     assert content.type == "text"
-    # The pure-Python extractor's Markdown: it drops link targets.
     assert "This is a link in a paragraph" in content.text
     assert "https://example.com/x" not in content.text
     for pid in map(int, pids.read_text().split()):
         assert wait_dead(pid), f"process {pid} outlived the timeout"
 
 
-@posix_only
 async def test_extraction_does_not_block_other_requests(
-    web: FakeWeb, bindir: Path, jsdir: Path, monkeypatch: pytest.MonkeyPatch
+    web: FakeWeb, bindir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install(jsdir)
     started = bindir / "started"
-    tool(bindir, "node", NODE_VERSION + f"touch {started}\nexec sleep 3600\n")
-    monkeypatch.setattr(readability_js, "EXTRACT_TIMEOUT_SECONDS", 5.0)
-    web.add(PAGE, html(ARTICLE))
+    helper = tool(
+        bindir, "hung-node", f"Path({str(started)!r}).touch()\ntime.sleep(60)\n"
+    )
+    monkeypatch.setattr(
+        worker_module, "find_node", lambda: (sys.executable, str(helper))
+    )
+    monkeypatch.setattr(server_module, "_NODE_TIMEOUT", 2.0)
+    web.add(
+        PAGE, httpx.Response(200, text=ARTICLE, headers={"content-type": "text/html"})
+    )
     async with connect(ignore_robots_txt=True) as (session, _):
         fetched: list[float] = []
         listed = float("inf")
@@ -173,43 +165,33 @@ async def test_extraction_does_not_block_other_requests(
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(call)
-            while not started.exists():
-                await anyio.sleep(0.05)
-            # Node.js is running (and hung); the loop still answers.
+            with anyio.fail_after(10):
+                while not started.exists():
+                    await anyio.sleep(0.02)
             tools = await session.list_tools()
             listed = time.monotonic()
             assert [t.name for t in tools.tools] == ["fetch"]
-        # The fetch finished (by falling back) only after the timeout, well
-        # after the listing was answered.
         assert listed < fetched[0] - 1
 
 
-# --- #5310: nothing a child prints reaches stdout ---------------------------
-
-
-@posix_only
 def test_npm_install_output_goes_to_stderr_not_stdout(
     bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     node = tool(bindir, "node", NODE_VERSION)
-    # npm prints to both streams, as the real one does, and installs.
-    deps = " ".join(f"{jsdir}/node_modules/{n}" for n in readability_js.JS_DEPENDENCIES)
+    deps = [str(jsdir / "node_modules" / n) for n in readability_js.JS_DEPENDENCIES]
     tool(
         bindir,
         "npm",
-        "echo 'added 38 packages, and audited 39 packages in 470ms'\n"
-        "echo 'npm warn deprecated' >&2\n"
-        f"for d in {deps}; do mkdir -p $d && echo '{{}}' > $d/package.json; done\n",
+        "print('added 38 packages, and audited 39 packages in 470ms')\nprint('npm warn deprecated', file=sys.stderr)\n"
+        + f"for name in {deps!r}:\n    path = Path(name); path.mkdir(parents=True)\n    (path / 'package.json').write_text('{{}}')\n",
     )
     assert readability_js.node_path() == str(node)
     out, err = capfd.readouterr()
     assert out == ""
-    assert "added 38 packages" in err
-    assert "npm warn deprecated" in err
+    assert "added 38 packages" in err and "npm warn deprecated" in err
     assert "contacts the npm registry" in err
 
 
-@posix_only
 def test_failed_extraction_stderr_goes_to_stderr_not_stdout(
     bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -217,45 +199,39 @@ def test_failed_extraction_stderr_goes_to_stderr_not_stdout(
     tool(
         bindir,
         "node",
-        NODE_VERSION + "echo 'on stdout'\necho 'TypeError: x' >&2\nexit 1\n",
+        NODE_VERSION
+        + "print('on stdout')\nprint('TypeError: x', file=sys.stderr)\nraise SystemExit(1)\n",
     )
     assert readability_js.extract_article(ARTICLE) is None
     out, err = capfd.readouterr()
     assert out == ""
-    assert "TypeError: x" in err
-    assert "Readability.js failed (exit 1)" in err
+    assert "TypeError: x" in err and "Readability.js failed (exit 1)" in err
 
 
-@posix_only
 def test_children_do_not_read_the_servers_stdin(
-    bindir: Path, jsdir: Path, tmp_path: Path
+    bindir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A child given the server's stdin could consume JSON-RPC input.
     seen = tmp_path / "stdin"
-    script = tool(bindir, "reader", f"cat > {seen}\n")
-    r, w = os.pipe()
-    saved = os.dup(0)
-    try:
-        os.dup2(r, 0)
-        os.write(w, b"not for the child\n")
-        os.close(w)
-        done = readability_js._run([str(script)], timeout=5)
-    finally:
-        os.dup2(saved, 0)
-        os.close(saved)
-        os.close(r)
+    script = tool(
+        bindir, "reader", f"Path({str(seen)!r}).write_text(sys.stdin.read())\n"
+    )
+    real_popen = subprocess.Popen
+    inputs: list[Any] = []
+
+    def popen(*args: Any, **kwargs: Any) -> Any:
+        inputs.append(kwargs["stdin"])
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(readability_js.subprocess, "Popen", popen)
+    done = readability_js._run([str(script)], timeout=5)
     assert done is not None and done.returncode == 0
+    assert inputs == [subprocess.DEVNULL]
     assert seen.read_text() == ""
-
-
-# --- #5313: node and npm are resolved through PATH (and PATHEXT) ------------
 
 
 def test_npm_is_run_by_the_path_shutil_which_resolves(
     jsdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # On Windows `shutil.which("npm")` finds `npm.cmd`, which a bare "npm"
-    # passed to CreateProcess does not; whatever it finds is what runs.
     found = {"node": r"C:\nodejs\node.exe", "npm": r"C:\nodejs\npm.CMD"}
     monkeypatch.setattr(readability_js.shutil, "which", found.get)
     runs: list[list[str]] = []
@@ -274,10 +250,6 @@ def test_npm_is_run_by_the_path_shutil_which_resolves(
     ]
 
 
-# --- Each way Readability.js can be unavailable falls back -------------------
-
-
-@posix_only
 def test_no_node_on_path(
     bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -285,9 +257,9 @@ def test_no_node_on_path(
     assert "Node.js was not found on PATH" in capfd.readouterr().err
 
 
-@posix_only
 @pytest.mark.parametrize(
-    "body", ["echo v12.22.0\n", "echo garbage\n", "exit 3\n", "exec sleep 3600\n"]
+    "body",
+    ["print('v12.22.0')", "print('garbage')", "raise SystemExit(3)", "time.sleep(60)"],
 )
 def test_old_or_broken_node(
     bindir: Path,
@@ -302,7 +274,6 @@ def test_old_or_broken_node(
     assert "Node.js >= 14 is needed" in capfd.readouterr().err
 
 
-@posix_only
 def test_no_npm_for_missing_dependencies(
     bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -311,19 +282,20 @@ def test_no_npm_for_missing_dependencies(
     assert "npm was not found on PATH" in capfd.readouterr().err
 
 
-@posix_only
 def test_failed_npm_install(
     bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     tool(bindir, "node", NODE_VERSION)
-    tool(bindir, "npm", "echo 'npm error network ENOTFOUND' >&2\nexit 1\n")
+    tool(
+        bindir,
+        "npm",
+        "print('npm error network ENOTFOUND', file=sys.stderr)\nraise SystemExit(1)",
+    )
     assert readability_js.node_path() is None
     err = capfd.readouterr().err
-    assert "npm error network ENOTFOUND" in err
-    assert "npm install failed (exit 1)" in err
+    assert "npm error network ENOTFOUND" in err and "npm install failed (exit 1)" in err
 
 
-@posix_only
 def test_hanging_npm_install_is_killed(
     bindir: Path,
     jsdir: Path,
@@ -332,78 +304,75 @@ def test_hanging_npm_install_is_killed(
 ) -> None:
     monkeypatch.setattr(readability_js, "INSTALL_TIMEOUT_SECONDS", 0.5)
     tool(bindir, "node", NODE_VERSION)
-    tool(bindir, "npm", "exec sleep 3600\n")
+    tool(bindir, "npm", "time.sleep(60)")
     assert readability_js.node_path() is None
     assert "npm did not finish within 0.5 s and was killed" in capfd.readouterr().err
 
 
-@posix_only
 def test_probe_runs_once_per_process(bindir: Path, jsdir: Path) -> None:
     calls = bindir / "calls"
-    node = tool(bindir, "node", f"echo x >> {calls}\n" + NODE_VERSION)
+    node = tool(
+        bindir,
+        "node",
+        f"with Path({str(calls)!r}).open('a') as f: f.write('x\\n')\n" + NODE_VERSION,
+    )
     install(jsdir)
     assert readability_js.node_path() == str(node)
     assert readability_js.node_path() == str(node)
     assert calls.read_text() == "x\n"
 
 
-@posix_only
 def test_unstartable_node(
-    bindir: Path, jsdir: Path, capfd: pytest.CaptureFixture[str]
+    bindir: Path,
+    jsdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
-    # Found on PATH but not executable as a program (no interpreter line).
-    script = bindir / "node"
-    script.write_bytes(b"\x00\x01")
-    script.chmod(0o755)
+    tool(bindir, "node", "")
+
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("unstartable helper")
+
+    monkeypatch.setattr(readability_js.subprocess, "Popen", unavailable)
     assert readability_js.node_path() is None
     assert "could not start" in capfd.readouterr().err
 
 
-@posix_only
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        # Readability.parse() found no article.
-        ('echo null > "$5"\n', ""),
-        ('echo \'{"content": null}\' > "$5"\n', ""),
-        (
-            'echo \'{"content": "<div><p>hi</p></div>"}\' > "$5"\n',
-            "<div><p>hi</p></div>",
-        ),
-        # Exit 0 but no output file: a failure, so fall back.
-        ("exit 0\n", None),
-        # Output that is not JSON.
-        ('echo "{" > "$5"\n', None),
+        ("null", ""),
+        ('{"content": null}', ""),
+        ('{"content": "<div><p>hi</p></div>"}', "<div><p>hi</p></div>"),
+        (None, None),
+        ("{", None),
     ],
 )
 def test_extraction_outcomes(
-    bindir: Path, jsdir: Path, body: str, expected: str | None
+    bindir: Path, jsdir: Path, body: str | None, expected: str | None
 ) -> None:
     install(jsdir)
-    tool(bindir, "node", NODE_VERSION + body)
+    code = f"Path(sys.argv[5]).write_text({body!r})\n" if body is not None else ""
+    tool(bindir, "node", NODE_VERSION + code)
     assert readability_js.extract_article(ARTICLE) == expected
 
 
-@posix_only
 def test_extraction_gets_the_page_and_runs_extractarticle(
     bindir: Path, jsdir: Path, tmp_path: Path
 ) -> None:
     install(jsdir)
-    copy = tmp_path / "seen.html"
-    args = tmp_path / "args"
+    copy, args = tmp_path / "seen.html", tmp_path / "args"
     tool(
         bindir,
         "node",
         NODE_VERSION
-        + f'echo "$1" > {args}\ncp "$3" {copy}\n'
-        + 'echo \'{"content": "<p>ok</p>"}\' > "$5"\n',
+        + f"Path({str(args)!r}).write_text(sys.argv[1])\n"
+        + f"Path({str(copy)!r}).write_text(Path(sys.argv[3]).read_text(encoding='utf-8'), encoding='utf-8')\n"
+        + 'Path(sys.argv[5]).write_text(\'{"content": "<p>ok</p>"}\')\n',
     )
     assert readability_js.extract_article("<p>é</p>") == "<p>ok</p>"
     assert copy.read_text(encoding="utf-8") == "<p>é</p>"
     assert args.read_text().strip() == str(jsdir / "ExtractArticle.js")
-
-
-# --- Killing the process tree ------------------------------------------------
 
 
 def test_kill_tree_uses_taskkill_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,69 +417,144 @@ def test_kill_tree_kills_the_child_when_taskkill_fails(
     assert killed == [True]
 
 
-@posix_only
 def test_timeout_returns_while_a_detached_helper_holds_the_pipes(
-    bindir: Path, jsdir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A helper that leaves the process group (its own session) survives the
-    # group kill and keeps stdout and stderr open; the run must still end.
-    install(jsdir)
-    pid = tmp_path / "helper.pid"
-    helper = (
-        "import os, time; os.setsid(); "
-        f"open({str(pid)!r}, 'w').write(str(os.getpid())); time.sleep(3600)"
+    events: list[str] = []
+
+    class Proc:
+        stdout = stderr = None
+
+        def communicate(self, timeout: float) -> Any:
+            events.append("communicate")
+            raise subprocess.TimeoutExpired("node", timeout)
+
+        def wait(self, timeout: float) -> None:
+            events.append("wait")
+            raise subprocess.TimeoutExpired("node", timeout)
+
+    monkeypatch.setattr(readability_js.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(
+        readability_js, "_kill_tree", lambda proc: events.append("kill")
     )
-    tool(bindir, "node", NODE_VERSION + f'"{sys.executable}" -c "{helper}" &\nwait\n')
-    monkeypatch.setattr(readability_js, "EXTRACT_TIMEOUT_SECONDS", 1.0)
-    started = time.monotonic()
-    try:
-        assert readability_js.extract_article(ARTICLE) is None
-        assert (
-            time.monotonic() - started < 1.0 + readability_js.KILL_TIMEOUT_SECONDS + 3
-        )
-    finally:
-        deadline = time.monotonic() + 5
-        while not pid.exists() and time.monotonic() < deadline:  # pragma: no cover
-            time.sleep(0.05)
-        os.kill(int(pid.read_text()), 9)
+    assert readability_js._run(["node"], 1.0) is None
+    assert events == ["communicate", "kill", "wait"]
 
 
-@posix_only
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("runner", ["worker", "retained"])
+@pytest.mark.parametrize("wait_times_out", [False, True])
+def test_posix_timeout_closes_owned_pipes_without_draining(
+    platform: str,
+    runner: str,
+    wait_times_out: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real file handles expose leaks immediately; only process operations are
+    # simulated so POSIX ownership can also be exercised on Windows.
+    events: list[str] = []
+    with ExitStack() as stack:
+        pipes = [
+            stack.enter_context((tmp_path / name).open("w+b"))
+            for name in ("stdin", "stdout", "stderr")
+        ]
+
+        class Proc:
+            stdin = pipes[0] if runner == "worker" else None
+            stdout = pipes[1]
+            stderr = pipes[2] if runner == "retained" else None
+            returncode = 0
+
+            def __class_getitem__(cls, item: Any) -> type[Proc]:
+                return cls
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def communicate(self, *args: Any, timeout: float) -> Any:
+                events.append("communicate")
+                raise subprocess.TimeoutExpired("node", timeout)
+
+            def kill(self) -> None:
+                events.append("kill")
+
+            def wait(self, timeout: float) -> None:
+                assert timeout == 5.0
+                events.append("wait")
+                if wait_times_out:
+                    raise subprocess.TimeoutExpired("node", timeout)
+
+        monkeypatch.setattr(readability_js.sys, "platform", platform)
+        monkeypatch.setattr(readability_js.subprocess, "Popen", Proc)
+        if runner == "worker":
+            # The worker discards stderr rather than owning a third pipe.
+            pipes[2].close()
+            assert worker_module._node_readability(ARTICLE, ["node"], 1.0) is None
+        else:
+            # The retained runner sends stdin to the null device.
+            pipes[0].close()
+            # Tree containment is covered separately; do not signal any native
+            # process while exercising the POSIX pipe-ownership branch.
+            monkeypatch.setattr(
+                readability_js, "_kill_tree", lambda proc: events.append("kill")
+            )
+            assert readability_js._run(["node"], 1.0) is None
+        assert events == ["communicate", "kill", "wait"]
+        assert all(pipe.closed for pipe in pipes)
+
+
 def test_kill_tree_tolerates_a_group_already_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    proc = subprocess.Popen(["true"], start_new_session=True)
-    proc.wait()
+    killed: list[bool] = []
+
+    class Proc:
+        pid = 4242
+
+        def kill(self) -> None:
+            killed.append(True)
 
     def gone(pid: int, sig: int) -> None:
         raise ProcessLookupError
 
-    monkeypatch.setattr(readability_js.os, "killpg", gone)
-    readability_js._kill_tree(cast("subprocess.Popen[str]", proc))
-
-
-# --- The server's use of the runner -----------------------------------------
+    monkeypatch.setattr(readability_js.sys, "platform", "linux")
+    monkeypatch.setattr(readability_js.os, "killpg", gone, raising=False)
+    monkeypatch.setattr(readability_js.signal, "SIGKILL", 9, raising=False)
+    readability_js._kill_tree(cast("subprocess.Popen[str]", Proc()))
+    assert killed == [True]
 
 
 def test_a_failed_second_run_keeps_the_first_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #3878's recovery re-runs Readability.js; if that run fails (None), the
-    # first run's content is returned rather than nothing.
     page = (
         "<html><body><p>short shell</p><div hidden><p>"
         + "long hidden content " * 20
         + "</p></div></body></html>"
     )
     results = iter(["<p>short shell</p>", None])
-    monkeypatch.setattr(server_module, "extract_article", lambda _: next(results))
-    assert server_module.extract_content_from_html(page).strip() == "short shell"
+    monkeypatch.setattr(worker_module, "_node_readability", lambda *a: next(results))
+    monkeypatch.setattr(worker_module, "_python_readability", lambda html: "")
+    result = worker_module.run(
+        {
+            "mode": "markdown",
+            "html": page,
+            "page_url": PAGE,
+            "links": False,
+            "sanitize": False,
+            "node": ["node"],
+            "node_timeout": 5,
+            "budget": 30,
+        }
+    )
+    assert result["content"].strip() == "short shell"
 
 
 def test_unavailable_readability_js_falls_back_to_python(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(server_module, "extract_article", lambda _: None)
+    monkeypatch.setattr(worker_module, "find_node", lambda: None)
     text = server_module.extract_content_from_html(ARTICLE)
     assert "This is a link in a paragraph" in text
     assert "https://example.com/x" not in text

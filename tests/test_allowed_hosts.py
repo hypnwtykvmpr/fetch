@@ -24,7 +24,7 @@ from mcp_server_fetch.allowlist import (
     parse_allowed_host,
 )
 
-from .harness import FakeWeb, connect
+from .harness import FakeWeb, connect, page_payload
 
 TOOL_ERROR = "Error executing tool fetch: "
 PAGE = "https://docs.example.com/guide"
@@ -55,7 +55,7 @@ def wire(result: CallToolResult) -> dict[str, Any]:
 def text_of(result: CallToolResult) -> str:
     data = wire(result)
     assert len(data["content"]) == 1
-    return data["content"][0]["text"]
+    return page_payload(data["content"][0]["text"])
 
 
 # --- entries ---------------------------------------------------------------
@@ -168,12 +168,13 @@ def test_flag_is_normalized_and_passed_to_serve(
         "10.0.0.1",
     )
     serve.assert_awaited_once_with(
-        None,
-        False,
-        None,
-        False,
-        ["example.com", "*.docs.example.org", "10.0.0.1"],
-        True,
+        custom_user_agent=None,
+        ignore_robots_txt=False,
+        proxy_url=None,
+        allow_private_ips=False,
+        allowed_hosts=["example.com", "*.docs.example.org", "10.0.0.1"],
+        use_readability_js=True,
+        lock_sanitization=False,
     )
 
 
@@ -268,9 +269,9 @@ async def test_prompt_refuses_unlisted_host_and_its_redirects(web: FakeWeb) -> N
         direct = await session.get_prompt("fetch", {"url": OTHER})
         redirected = await session.get_prompt("fetch", {"url": PAGE})
     for prompt in (direct, redirected):
-        content = prompt.messages[0].content
-        assert isinstance(content, TextContent)
-        assert content.text == refused(OTHER, "other.example.org")
+        text = prompt.messages[0].content
+        assert isinstance(text, TextContent)
+        assert page_payload(text.text) == refused(OTHER, "other.example.org")
     assert web.urls() == [PAGE]
 
 

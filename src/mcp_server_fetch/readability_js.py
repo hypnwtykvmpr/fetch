@@ -137,13 +137,20 @@ def _run(
         _kill_tree(proc)
         # Reap the child, but do not drain its pipes: a descendant that left
         # its process group (or survived taskkill) can hold them open forever.
-        # The pipes close when `proc` is collected.
         try:
             proc.wait(timeout=KILL_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             pass
         _log(f"{Path(argv[0]).name} did not finish within {timeout:g} s and was killed")
         return None
+    finally:
+        if sys.platform != "win32":
+            # POSIX communicate leaves pipes open on timeout. Windows reader
+            # threads close their own pipes; taking their locks here can block
+            # while a surviving descendant still holds the write ends open.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 

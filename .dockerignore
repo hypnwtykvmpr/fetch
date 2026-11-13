@@ -1,0 +1,15 @@
+# Allowlist: the build context holds only what the image build needs.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!README.md
+!LICENSE
+!src/
+src/**/__pycache__
+src/**/*.py[cod]
+src/**/.*
+src/**/*.key
+src/**/*.pem
+src/**/*.p12
+src/**/*.pfx

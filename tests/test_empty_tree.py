@@ -20,12 +20,15 @@ from typing import Any
 
 import httpx
 import pytest
-import readabilipy.simple_json
+import readabilipy.simple_tree
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 from mcp.types import CallToolResult
 
-from .harness import FakeWeb, connect
+from mcp_server_fetch import _worker
+from mcp_server_fetch.server import _page_meta
+
+from .harness import FakeWeb, connect, unwrap
 
 PAGE = "https://example.com/app"
 FAILED = "<error>Page failed to be simplified from HTML</error>"
@@ -73,12 +76,10 @@ def html(body: str) -> httpx.Response:
 @pytest.mark.parametrize("page", [SPA_SHELL, "<html><body></body></html>", ""])
 def test_emulation_reproduces_the_reported_crash(page: str) -> None:
     with pytest.raises(IndexError, match="list index out of range"):
-        readabilipy.simple_json.simple_json_from_html_string(
-            page, use_readability=False
-        )
+        readabilipy.simple_tree.simple_tree_from_html_string(page)
 
 
-@pytest.mark.usefixtures("python_readability", "bs4_413_append")
+@pytest.mark.usefixtures("python_readability", "bs4_413_append", "worker_in_process")
 async def test_empty_tree_tool_call_reports_simplification_failure(
     web: FakeWeb,
 ) -> None:
@@ -86,12 +87,20 @@ async def test_empty_tree_tool_call_reports_simplification_failure(
     async with connect(ignore_robots_txt=True) as (session, _):
         result = await session.call_tool("fetch", {"url": PAGE})
     assert wire(result) == {
-        "content": [{"type": "text", "text": f"Contents of {PAGE}:\n{FAILED}"}],
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"Contents of {PAGE}:\n{FAILED}"
+                    + _page_meta(len(FAILED), 0, len(FAILED))
+                ),
+            }
+        ],
         "isError": False,
     }
 
 
-@pytest.mark.usefixtures("python_readability", "bs4_413_append")
+@pytest.mark.usefixtures("python_readability", "bs4_413_append", "worker_in_process")
 async def test_empty_tree_prompt_reports_simplification_failure(
     web: FakeWeb,
 ) -> None:
@@ -101,10 +110,10 @@ async def test_empty_tree_prompt_reports_simplification_failure(
     assert len(result.messages) == 1
     content = result.messages[0].content
     assert content.type == "text"
-    assert content.text == FAILED
+    assert unwrap(content.text) == FAILED
 
 
-@pytest.mark.usefixtures("python_readability", "bs4_413_append")
+@pytest.mark.usefixtures("python_readability", "bs4_413_append", "worker_in_process")
 async def test_page_with_content_still_extracts_under_bs4_413(web: FakeWeb) -> None:
     # Only the empty tree trips the index; a page with content is unaffected.
     web.add(PAGE, html(ARTICLE))
@@ -116,3 +125,24 @@ async def test_page_with_content_still_extracts_under_bs4_413(web: FakeWeb) -> N
     assert content["type"] == "text"
     assert "# Heading" in content["text"]
     assert "A paragraph with enough words" in content["text"]
+
+
+@pytest.mark.usefixtures("python_readability", "bs4_413_append")
+async def test_the_append_patch_reaches_the_worker_through_the_seam(
+    web: FakeWeb,
+    worker_in_process: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bs4 4.15 raises without the emulation too, so prove the seam directly."""
+    reached: list[str] = []
+    original = _worker._python_readability
+
+    def spy(html: str) -> str:
+        reached.append(html)
+        return original(html)
+
+    monkeypatch.setattr(_worker, "_python_readability", spy)
+    web.add(PAGE, html(SPA_SHELL))
+    async with connect(ignore_robots_txt=True) as (session, _):
+        await session.call_tool("fetch", {"url": PAGE})
+    assert reached and worker_in_process

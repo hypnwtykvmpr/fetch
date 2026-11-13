@@ -1,19 +1,11 @@
-"""Protocol-level tests for the cap on how much of a response body is read (#5370).
+"""Upstream response-cap regressions against the hardened fork contract.
 
-The server used to read a whole body into memory before converting or
-truncating anything, so a URL serving a very large or endless body made it
-buffer all of it. It now streams the body and stops at ``MAX_RESPONSE_BYTES``:
-a page whose Content-Length is over the cap is refused before any of it is
-read, a page that streams past the cap is refused once it does, and a
-robots.txt is parsed from its first ``MAX_RESPONSE_BYTES``. Redirects are
-followed without reading the redirect's body, which httpx would otherwise read
-whole. A gzip or deflate body is decoded by the server itself with each
-step's output bounded by the room left under the cap, since httpx inflates a
-whole network chunk at once (a compression bomb); any other content coding is
-refused. These tests drive the real server through an MCP client
-(``harness.connect``) with HTTP served by ``harness.FakeWeb``, under a small
-cap so a body over it stays cheap; endless bodies count the chunks they hand
-out, to show the read stopped.
+Requests run through a real MCP client and mocked streamed HTTP. Small page
+and robots budgets check unread declared bodies, bounded decompression,
+redirects and endless bodies without large allocations. This fork retains
+its metadata/envelope output and fails closed on oversized robots.txt.
+Its gzip multi-member and two-layer coding support has an independent wire
+budget, including trailing padding. No test reaches an external network.
 """
 
 from __future__ import annotations
@@ -29,7 +21,7 @@ from mcp.types import CallToolResult
 
 import mcp_server_fetch.server as server_module
 
-from .harness import FakeWeb, connect
+from .harness import FakeWeb, connect, page_payload
 
 PAGE = "https://example.com/page"
 ROBOTS = "https://example.com/robots.txt"
@@ -43,6 +35,7 @@ CHUNK = 300  # Does not divide CAP, so the cap falls inside a chunk.
 @pytest.fixture(autouse=True)
 def small_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "MAX_RESPONSE_BYTES", CAP)
+    monkeypatch.setattr(server_module, "MAX_ROBOTS_BYTES", CAP)
 
 
 class Body:
@@ -77,15 +70,18 @@ def wire(result: CallToolResult) -> dict[str, Any]:
 
 
 def text_of(result: CallToolResult) -> str:
-    return wire(result)["content"][0]["text"]
+    text = wire(result)["content"][0]["text"]
+    return text if wire(result)["isError"] else page_payload(text)
 
 
-def too_large(declared: int | None = None) -> str:
-    message = (
-        f"{TOOL_ERROR}Failed to fetch {PAGE}: the response body is larger than "
-        f"the {CAP} byte limit this server reads"
-    )
-    return message if declared is None else f"{message} (it declares {declared} bytes)"
+def assert_too_large(result: CallToolResult, declared: int | None = None) -> None:
+    assert wire(result)["isError"] is True
+    text = text_of(result)
+    assert text.startswith(TOOL_ERROR)
+    assert PAGE in text and str(CAP) in text
+    assert "too large" in text
+    if declared is not None:
+        assert f"declares {declared} bytes" in text
 
 
 async def call(**arguments: Any) -> CallToolResult:
@@ -123,14 +119,14 @@ async def test_a_body_one_byte_over_the_cap_is_refused(web: FakeWeb) -> None:
     web.add(PAGE, streamed(Body(CAP + 1)))
     result = await call()
     assert wire(result)["isError"] is True
-    assert text_of(result) == too_large()
+    assert_too_large(result)
 
 
 async def test_an_endless_body_stops_being_read_at_the_cap(web: FakeWeb) -> None:
     body = Body()
     web.add(PAGE, streamed(body))
     result = await call()
-    assert text_of(result) == too_large()
+    assert_too_large(result)
     # The chunk that crosses the cap is the last one taken.
     assert body.chunks_sent == CAP // CHUNK + 1
 
@@ -141,7 +137,7 @@ async def test_a_declared_length_over_the_cap_is_refused_unread(
     body = Body()
     web.add(PAGE, streamed(body, **{"content-length": str(CAP + 1)}))
     result = await call()
-    assert text_of(result) == too_large(declared=CAP + 1)
+    assert_too_large(result, declared=CAP + 1)
     assert body.chunks_sent == 0
 
 
@@ -151,7 +147,7 @@ async def test_an_unparsable_content_length_falls_back_to_the_streamed_cap(
     body = Body()
     web.add(PAGE, streamed(body, **{"content-length": "lots"}))
     result = await call()
-    assert text_of(result) == too_large()
+    assert_too_large(result)
 
 
 async def test_the_cap_counts_decompressed_bytes(web: FakeWeb) -> None:
@@ -167,7 +163,7 @@ async def test_the_cap_counts_decompressed_bytes(web: FakeWeb) -> None:
         ),
     )
     result = await call()
-    assert text_of(result) == too_large()
+    assert_too_large(result)
 
 
 async def test_a_redirect_body_is_not_read(web: FakeWeb) -> None:
@@ -198,8 +194,8 @@ async def test_a_redirect_loop_is_refused(web: FakeWeb) -> None:
     result = await call()
     assert wire(result)["isError"] is True
     assert "TooManyRedirects" in text_of(result)
-    # The first request and the 20 redirects httpx allows by default.
-    assert len(web.requests) == 21
+    # The fork caps the complete chain at 20 requests, including the first.
+    assert len(web.requests) == 20
 
 
 async def test_the_timeout_reaches_every_redirect_hop(web: FakeWeb) -> None:
@@ -213,11 +209,11 @@ async def test_the_timeout_reaches_every_redirect_hop(web: FakeWeb) -> None:
     assert [r.extensions["timeout"]["read"] for r in web.requests] == [1.234, 1.234]
 
 
-async def test_robots_txt_is_parsed_from_its_first_bytes_up_to_the_cap(
+async def test_robots_txt_over_its_fork_cap_is_refused(
     web: FakeWeb,
 ) -> None:
-    # Rules first, then endless padding: the read stops at the cap and the
-    # rules it holds still apply.
+    # The fork fails closed on an oversized robots.txt instead of using
+    # partial rules. Both variants stop the stream before fetching the page.
     rules = b"User-agent: *\nDisallow: /page\n"
     padding = Body(fill=b"#")
 
@@ -233,9 +229,7 @@ async def test_robots_txt_is_parsed_from_its_first_bytes_up_to_the_cap(
     async with connect() as (session, _):
         result = await session.call_tool("fetch", {"url": PAGE})
     assert wire(result)["isError"] is True
-    assert "specifies that autonomous fetching of this page is not allowed" in (
-        text_of(result)
-    )
+    assert "too large" in text_of(result)
     assert padding.chunks_sent <= CAP // CHUNK + 1
     assert web.urls() == [ROBOTS]
 
@@ -245,7 +239,8 @@ async def test_the_prompt_reports_an_oversized_page(web: FakeWeb) -> None:
     async with connect() as (session, _):
         result = await session.get_prompt("fetch", {"url": PAGE})
     message = result.model_dump(mode="json")["messages"][0]["content"]["text"]
-    assert message == too_large().removeprefix(TOOL_ERROR)
+    message = page_payload(message)
+    assert "too large" in message and PAGE in message and str(CAP) in message
 
 
 # --- content codings ----------------------------------------------------------
@@ -279,6 +274,14 @@ async def test_a_compression_bomb_never_decodes_past_the_cap(
             self._z = real(*args)
 
         @property
+        def eof(self) -> bool:
+            return self._z.eof
+
+        @property
+        def unused_data(self) -> bytes:
+            return self._z.unused_data
+
+        @property
         def unconsumed_tail(self) -> bytes:
             return self._z.unconsumed_tail
 
@@ -292,7 +295,7 @@ async def test_a_compression_bomb_never_decodes_past_the_cap(
     assert len(bomb) < CAP * 50
     web.add(PAGE, encoded(bomb, "gzip"))
     result = await call()
-    assert text_of(result) == too_large()
+    assert_too_large(result)
     assert outputs and max(outputs) <= CAP + 1
     assert sum(outputs) <= CAP + 1
 
@@ -301,7 +304,7 @@ async def test_a_compression_bomb_never_decodes_past_the_cap(
     ("coding", "encode"),
     [("gzip", gzip.compress), ("deflate", zlib.compress), ("deflate", raw_deflate)],
 )
-async def test_data_after_the_compressed_stream_is_not_read(
+async def test_data_after_the_compressed_stream_remains_bounded(
     web: FakeWeb, coding: str, encode: Any
 ) -> None:
     # A complete compressed body, then endless trailing bytes: zlib would hold
@@ -323,12 +326,17 @@ async def test_data_after_the_compressed_stream_is_not_read(
         ),
     )
     result = await call()
-    assert wire(result)["isError"] is False
-    assert text_of(result).endswith("t" * 10)
-    assert trailing.chunks_sent <= 1
+    # The fork supports concatenated gzip members and rejects deflate
+    # suffixes, so it cannot stop at the first member like upstream. Its
+    # independent wire budget still bounds an endless trailing stream.
+    assert wire(result)["isError"] is True
+    assert "too large" in text_of(result) or "corrupt compressed body" in text_of(
+        result
+    )
+    assert trailing.chunks_sent <= (CAP + 64 * 1024) // CHUNK + 1
 
 
-async def test_robots_txt_stops_at_the_end_of_its_compressed_stream(
+async def test_robots_txt_trailing_gzip_padding_remains_bounded(
     web: FakeWeb,
 ) -> None:
     trailing = Body(fill=b"\x00")
@@ -348,10 +356,9 @@ async def test_robots_txt_stops_at_the_end_of_its_compressed_stream(
     )
     async with connect() as (session, _):
         result = await session.call_tool("fetch", {"url": PAGE})
-    assert "specifies that autonomous fetching of this page is not allowed" in (
-        text_of(result)
-    )
-    assert trailing.chunks_sent <= 1
+    assert wire(result)["isError"] is True
+    assert "too large" in text_of(result)
+    assert trailing.chunks_sent <= (CAP + 64 * 1024) // CHUNK + 1
 
 
 @pytest.mark.parametrize(
@@ -361,6 +368,7 @@ async def test_robots_txt_stops_at_the_end_of_its_compressed_stream(
         ("x-gzip", gzip.compress),
         ("GZIP", gzip.compress),
         ("identity, gzip", gzip.compress),
+        ("gzip, gzip", lambda data: gzip.compress(gzip.compress(data))),
         ("deflate", zlib.compress),
         ("deflate", raw_deflate),  # sent without zlib's wrapper
     ],
@@ -380,15 +388,15 @@ async def test_an_identity_coding_is_read_as_is(web: FakeWeb) -> None:
     assert text_of(result).endswith("plain")
 
 
-@pytest.mark.parametrize("coding", ["br", "zstd", "gzip, gzip", "compress"])
+@pytest.mark.parametrize("coding", ["br", "zstd", "compress"])
 async def test_a_coding_the_server_cannot_bound_is_refused(
     web: FakeWeb, coding: str
 ) -> None:
     web.add(PAGE, encoded(b"\x00\x01\x02", coding))
     result = await call()
     assert wire(result)["isError"] is True
-    assert "Unsupported content encoding" in text_of(result)
-    assert "this server decodes only gzip, deflate" in text_of(result)
+    assert f"Content-Encoding {coding}" in text_of(result)
+    assert "does not decode" in text_of(result)
 
 
 @pytest.mark.parametrize("coding", ["gzip", "deflate"])
@@ -397,7 +405,7 @@ async def test_a_corrupt_body_is_a_decoding_error(web: FakeWeb, coding: str) -> 
     web.add(PAGE, encoded(b"\xff" * 64, coding))
     result = await call()
     assert wire(result)["isError"] is True
-    assert "Error decoding the response body" in text_of(result)
+    assert "corrupt compressed body" in text_of(result)
 
 
 async def test_only_the_codings_it_decodes_are_asked_for(web: FakeWeb) -> None:

@@ -1,5 +1,15 @@
-# Coverage output from `uv run --frozen pytest --cov ...` (see README, Development).
+# Coverage output from `uv run --locked pytest --cov ...` (see CONTRIBUTING.md).
 # Kept per server so each Python server ignores its own reports.
 coverage.json
 .coverage
 .coverage.*
+
+# Generated environments, caches and build output.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+build/
+dist/

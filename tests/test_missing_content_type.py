@@ -16,7 +16,7 @@ import httpx
 import pytest
 from mcp.types import CallToolResult
 
-from mcp_server_fetch.server import _body_looks_like_html
+from mcp_server_fetch.server import _body_looks_like_html, _page_meta
 
 from .harness import FakeWeb, connect
 
@@ -57,7 +57,9 @@ async def fetch(web: FakeWeb, response: httpx.Response) -> str:
 
 def assert_raw(text: str, body: str) -> None:
     assert "Page failed to be simplified" not in text
-    assert text.endswith(f"Contents of {PAGE}:\n{body}")
+    assert text.endswith(
+        f"Contents of {PAGE}:\n{body}" + _page_meta(len(body), 0, len(body))
+    )
     assert "cannot be simplified to markdown, but here is the raw content:" in text
 
 
@@ -92,7 +94,11 @@ async def test_empty_body_without_content_type_is_not_simplified(
     text = await fetch(web, headerless(""))
     assert "Page failed to be simplified" not in text
     assert "cannot be simplified to markdown, but here is the raw content:" in text
-    assert text.endswith("<error>No more content available.</error>")
+    # The exhaustion notice carries the meta line of the empty page it
+    # returned: total_length 0, returned_length 0, has_more false.
+    assert text.endswith(
+        "<error>No more content available.</error>" + _page_meta(0, 0, 0)
+    )
 
 
 @pytest.mark.usefixtures("node_readability")

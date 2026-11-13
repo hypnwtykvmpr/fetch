@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/modelcontextprotocol/servers.git",
+  "subdirectory": "src/fetch",
+  "source_commit": "e1dc4b18dbb948921da37f3d4224a628730b43b0",
+  "extracted_baseline": "c10d749f65e6521aefc3dfdf5b5609606a1688ec"
+}
